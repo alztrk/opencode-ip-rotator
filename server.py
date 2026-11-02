@@ -10,7 +10,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 
@@ -211,7 +211,7 @@ def log_ip_rotation_to_db(ip: str, country: str, flag: str, timestamp: str, reas
     except Exception as e:
         log.error(f"Failed to log IP rotation to DB: {e}")
 
-def load_ip_history_from_db() -> List[Dict[str, any]]:
+def load_ip_history_from_db() -> List[Dict[str, Any]]:
     if not DB_FILE.exists():
         return []
     try:
@@ -230,7 +230,7 @@ def load_ip_history_from_db() -> List[Dict[str, any]]:
         log.error(f"Error loading IP history from DB: {e}")
         return []
 
-def load_metrics_from_db() -> Dict[str, Dict[str, any]]:
+def load_metrics_from_db() -> Dict[str, Dict[str, Any]]:
     if not DB_FILE.exists():
         return {}
     try:
@@ -439,7 +439,12 @@ TARGET_ZEN_URL = f"{TARGET_ZEN_BASE}/chat/completions"
 TARGET_ZEN_ANTHROPIC_URL = f"{TARGET_ZEN_BASE}/messages"
 TARGET_ZEN_RESPONSES_URL = f"{TARGET_ZEN_BASE}/responses"
 
-MAX_RETRIES_ON_429 = int(os.environ.get("MAX_RETRIES_ON_429", "8"))
+MIN_ATTEMPTS_BEFORE_RATE_LIMIT = 3
+MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT = 1
+MAX_RETRIES_ON_429 = max(
+    MIN_ATTEMPTS_BEFORE_RATE_LIMIT,
+    int(os.environ.get("MAX_RETRIES_ON_429", "8")),
+)
 INITIAL_BACKOFF = float(os.environ.get("INITIAL_BACKOFF", "1"))
 WARP_ROTATOR_URL = os.environ.get("WARP_ROTATOR_URL", "http://127.0.0.1:8001").rstrip("/")
 CORS_ALLOW_ORIGINS = [
@@ -611,7 +616,7 @@ def log_upstream_response(response, model_name: str, endpoint: str, attempt: int
     )
 
 
-def upstream_rate_limit_response(response, model_name: str) -> JSONResponse:
+def rate_limit_response(response, model_name: str) -> JSONResponse:
     category, retry_seconds, payload = classify_upstream_429(response)
     headers = {"X-Rate-Limit-Reason": category}
     if retry_seconds is not None:
@@ -624,7 +629,23 @@ def upstream_rate_limit_response(response, model_name: str) -> JSONResponse:
         {key: value for key, value in response.headers.items() if key.lower() in SAFE_UPSTREAM_HEADERS},
         redact_for_log(payload),
     )
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        payload["error"]["type"] = category
     return JSONResponse(status_code=429, content=payload, headers=headers)
+
+
+def stream_rate_limit_response(model_name: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": {
+                "message": f"Stream unavailable for model '{model_name}' after retries and IP rotation.",
+                "type": "rate_limit",
+                "code": 429,
+            }
+        },
+        headers={"Retry-After": "10", "X-Rate-Limit-Reason": "rate_limit"},
+    )
 
 
 def rotate_egress(reason: str) -> tuple[bool, Optional[str]]:
@@ -642,6 +663,26 @@ def rotate_egress(reason: str) -> tuple[bool, Optional[str]]:
 class EmptyStreamError(Exception):
     """Raised when upstream returns an empty or truncated stream without valid content/tool calls."""
     pass
+
+
+async def prepare_stream_response(response, model_name: str, session=None):
+    """Validate the first stream chunk before committing the HTTP response."""
+    stream = stream_response(response, model_name, session=session)
+    try:
+        first_chunk = await stream.__anext__()
+    except Exception:
+        await stream.aclose()
+        raise
+
+    async def replay_stream():
+        try:
+            yield first_chunk
+            async for chunk in stream:
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    return replay_stream()
 
 async def stream_response(response, model_name: str, session=None) -> AsyncGenerator[bytes, None]:
     loop = asyncio.get_event_loop()
@@ -892,8 +933,8 @@ async def chat_completions(raw_request: Request):
     start_time = time.time()
     try:
         payload = await raw_request.json()
-    except Exception:
-        payload = {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
     current_model = payload.get("model", "deepseek-v4-flash-free")
     is_stream = payload.get("stream", False)
@@ -904,6 +945,7 @@ async def chat_completions(raw_request: Request):
         if k.lower().startswith("x-opencode-"):
             headers[k] = v
 
+    ip_rotation_count = 0
     for attempt in range(1, MAX_RETRIES_ON_429 + 1):
         try:
             await asyncio.sleep(random.uniform(0.1, 0.3))
@@ -923,7 +965,25 @@ async def chat_completions(raw_request: Request):
             if response.status_code == 429:
                 metrics["rate_limited_requests"] += 1
                 prom_requests_rate_limited.labels(model=current_model).inc()
-                return upstream_rate_limit_response(response, current_model)
+                if attempt < MIN_ATTEMPTS_BEFORE_RATE_LIMIT:
+                    delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
+                    log.warning(
+                        "Upstream 429 for '%s'; retrying before returning rate_limit (%s/%s) in %.2fs.",
+                        current_model,
+                        attempt,
+                        MIN_ATTEMPTS_BEFORE_RATE_LIMIT,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
+                    ip_rotation_count += 1
+                    rotated, verified_ip = await asyncio.to_thread(rotate_egress, "upstream rate limit")
+                    if rotated:
+                        log.warning("Retrying '%s' after IP rotation to %s.", current_model, verified_ip or "unknown")
+                        continue
+                    log.error("IP rotation failed for '%s' after upstream rate limits.", current_model)
+                return rate_limit_response(response, current_model)
 
             if response.status_code >= 500:
                 delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
@@ -938,7 +998,7 @@ async def chat_completions(raw_request: Request):
             if is_stream:
                 try:
                     # Pre-verify that the response is not an empty stream before committing to StreamingResponse
-                    stream_gen = stream_response(response, current_model, session=session)
+                    stream_gen = await prepare_stream_response(response, current_model, session=session)
                     metrics["successful_requests"] += 1
                     prom_requests_success.labels(model=current_model).inc()
                     prom_request_duration.labels(model=current_model, endpoint="chat_completions").observe(time.time() - start_time)
@@ -949,9 +1009,14 @@ async def chat_completions(raw_request: Request):
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
                     )
                 except EmptyStreamError:
-                    log.warning("Empty stream for '%s'; retrying without egress rotation (%s/%s).", current_model, attempt, MAX_RETRIES_ON_429)
-                    delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
-                    await asyncio.sleep(delay)
+                    if attempt >= MIN_ATTEMPTS_BEFORE_RATE_LIMIT and ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
+                        ip_rotation_count += 1
+                        rotated, _ = await asyncio.to_thread(rotate_egress, "empty upstream stream")
+                        if not rotated:
+                            return stream_rate_limit_response(current_model)
+                    else:
+                        delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
+                        await asyncio.sleep(delay)
                     continue
             else:
                 with FlowContext():
@@ -980,6 +1045,8 @@ async def chat_completions(raw_request: Request):
                 await asyncio.sleep(min(2 ** attempt, BACKOFF_CAP))
             continue
 
+    if is_stream:
+        return stream_rate_limit_response(current_model)
     log.error(f"All {MAX_RETRIES_ON_429} attempts exhausted for model '{current_model}'. Returning 503.")
     return JSONResponse(
         status_code=503,
@@ -999,8 +1066,8 @@ async def anthropic_messages(raw_request: Request):
     start_time = time.time()
     try:
         body = await raw_request.json()
-    except Exception:
-        body = {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
     model_name = body.get("model", "deepseek-v4-flash-free")
     is_stream = body.get("stream", False)
@@ -1020,6 +1087,7 @@ async def anthropic_messages(raw_request: Request):
         if kl.startswith("x-opencode-") or kl.startswith("anthropic-"):
             headers[k] = v
 
+    ip_rotation_count = 0
     for attempt in range(1, MAX_RETRIES_ON_429 + 1):
         try:
             await asyncio.sleep(random.uniform(0.1, 0.3))
@@ -1039,7 +1107,25 @@ async def anthropic_messages(raw_request: Request):
             if response.status_code == 429:
                 metrics["rate_limited_requests"] += 1
                 prom_requests_rate_limited.labels(model=model_name).inc()
-                return upstream_rate_limit_response(response, model_name)
+                if attempt < MIN_ATTEMPTS_BEFORE_RATE_LIMIT:
+                    delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
+                    log.warning(
+                        "Upstream 429 for '%s'; retrying before returning rate_limit (%s/%s) in %.2fs.",
+                        model_name,
+                        attempt,
+                        MIN_ATTEMPTS_BEFORE_RATE_LIMIT,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
+                    ip_rotation_count += 1
+                    rotated, verified_ip = await asyncio.to_thread(rotate_egress, "upstream rate limit")
+                    if rotated:
+                        log.warning("Retrying '%s' after IP rotation to %s.", model_name, verified_ip or "unknown")
+                        continue
+                    log.error("IP rotation failed for '%s' after upstream rate limits.", model_name)
+                return rate_limit_response(response, model_name)
 
             if response.status_code >= 500:
                 delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
@@ -1052,8 +1138,19 @@ async def anthropic_messages(raw_request: Request):
             prom_request_duration.labels(model=model_name, endpoint="anthropic_messages").observe(time.time() - start_time)
 
             if is_stream:
+                try:
+                    stream_gen = await prepare_stream_response(response, model_name, session=session)
+                except EmptyStreamError:
+                    if attempt >= MIN_ATTEMPTS_BEFORE_RATE_LIMIT and ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
+                        ip_rotation_count += 1
+                        rotated, _ = await asyncio.to_thread(rotate_egress, "empty upstream stream")
+                        if not rotated:
+                            return stream_rate_limit_response(model_name)
+                    else:
+                        await asyncio.sleep(compute_backoff_delay(attempt, INITIAL_BACKOFF))
+                    continue
                 return StreamingResponse(
-                    stream_response(response, model_name, session=session),
+                    stream_gen,
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
@@ -1078,6 +1175,8 @@ async def anthropic_messages(raw_request: Request):
                 await asyncio.sleep(min(2 ** attempt, BACKOFF_CAP))
             continue
 
+    if is_stream:
+        return stream_rate_limit_response(model_name)
     log.error(f"All {MAX_RETRIES_ON_429} attempts exhausted for Anthropic model '{model_name}'. Returning 503.")
     return JSONResponse(
         status_code=503,
@@ -1094,8 +1193,8 @@ async def responses_endpoint(raw_request: Request):
     start_time = time.time()
     try:
         body = await raw_request.json()
-    except Exception:
-        body = {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
     model_name = body.get("model", "deepseek-v4-flash-free")
     is_stream = body.get("stream", False)
@@ -1106,6 +1205,7 @@ async def responses_endpoint(raw_request: Request):
         if k.lower().startswith("x-opencode-"):
             headers[k] = v
 
+    ip_rotation_count = 0
     for attempt in range(1, MAX_RETRIES_ON_429 + 1):
         try:
             await asyncio.sleep(random.uniform(0.1, 0.3))
@@ -1125,7 +1225,25 @@ async def responses_endpoint(raw_request: Request):
             if response.status_code == 429:
                 metrics["rate_limited_requests"] += 1
                 prom_requests_rate_limited.labels(model=model_name).inc()
-                return upstream_rate_limit_response(response, model_name)
+                if attempt < MIN_ATTEMPTS_BEFORE_RATE_LIMIT:
+                    delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
+                    log.warning(
+                        "Upstream 429 for '%s'; retrying before returning rate_limit (%s/%s) in %.2fs.",
+                        model_name,
+                        attempt,
+                        MIN_ATTEMPTS_BEFORE_RATE_LIMIT,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
+                    ip_rotation_count += 1
+                    rotated, verified_ip = await asyncio.to_thread(rotate_egress, "upstream rate limit")
+                    if rotated:
+                        log.warning("Retrying '%s' after IP rotation to %s.", model_name, verified_ip or "unknown")
+                        continue
+                    log.error("IP rotation failed for '%s' after upstream rate limits.", model_name)
+                return rate_limit_response(response, model_name)
 
             if response.status_code >= 500:
                 delay = compute_backoff_delay(attempt, INITIAL_BACKOFF)
@@ -1138,8 +1256,19 @@ async def responses_endpoint(raw_request: Request):
             prom_request_duration.labels(model=model_name, endpoint="responses").observe(time.time() - start_time)
 
             if is_stream:
+                try:
+                    stream_gen = await prepare_stream_response(response, model_name, session=session)
+                except EmptyStreamError:
+                    if attempt >= MIN_ATTEMPTS_BEFORE_RATE_LIMIT and ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
+                        ip_rotation_count += 1
+                        rotated, _ = await asyncio.to_thread(rotate_egress, "empty upstream stream")
+                        if not rotated:
+                            return stream_rate_limit_response(model_name)
+                    else:
+                        await asyncio.sleep(compute_backoff_delay(attempt, INITIAL_BACKOFF))
+                    continue
                 return StreamingResponse(
-                    stream_response(response, model_name, session=session),
+                    stream_gen,
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
@@ -1157,6 +1286,8 @@ async def responses_endpoint(raw_request: Request):
                 await asyncio.sleep(min(2 ** attempt, BACKOFF_CAP))
             continue
 
+    if is_stream:
+        return stream_rate_limit_response(model_name)
     log.error(f"All {MAX_RETRIES_ON_429} attempts exhausted for Responses model '{model_name}'. Returning 503.")
     return JSONResponse(
         status_code=503,

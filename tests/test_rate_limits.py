@@ -35,6 +35,11 @@ class RateLimitClassificationTests(unittest.TestCase):
         _, retry_after, _ = classify_upstream_429(response)
         self.assertIsNone(retry_after)
 
+    def test_unknown_error_type_uses_generic_rate_limit_category(self):
+        response = FakeResponse({"error": {"type": "unknown_limit"}})
+        category, _, _ = classify_upstream_429(response)
+        self.assertEqual(category, "rate_limit")
+
     def test_missing_lease_table_blocks_rotation_conservatively(self):
         with TemporaryDirectory() as directory:
             original_path = rotator.FLOW_LEASE_DB_PATH
