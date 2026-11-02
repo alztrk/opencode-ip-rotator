@@ -11,8 +11,6 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request as UrlRequest, urlopen
 
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
@@ -23,6 +21,7 @@ from pydantic import BaseModel, Field
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from curl_cffi import requests as cffi_requests
+from model_catalog import DEFAULT_MODELS_URL, fetch_free_models
 from rate_limits import classify_upstream_429
 from rotator import flow_lock, active_flows_count, get_public_ip, get_ip_location, rotation_count
 
@@ -438,6 +437,8 @@ TARGET_ZEN_BASE = os.environ.get("OPENCODE_ZEN_TARGET_BASE", "https://opencode.a
 TARGET_ZEN_URL = f"{TARGET_ZEN_BASE}/chat/completions"
 TARGET_ZEN_ANTHROPIC_URL = f"{TARGET_ZEN_BASE}/messages"
 TARGET_ZEN_RESPONSES_URL = f"{TARGET_ZEN_BASE}/responses"
+MODEL_CATALOG_URL = os.environ.get("OPENCODE_MODELS_URL", DEFAULT_MODELS_URL)
+DEFAULT_MODEL_OVERRIDE = os.environ.get("OPENCODE_DEFAULT_MODEL", "").strip()
 
 MIN_ATTEMPTS_BEFORE_RATE_LIMIT = 3
 MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT = 1
@@ -462,16 +463,22 @@ metrics = {
     "start_time": time.time()
 }
 
-DEFAULT_FREE_MODELS = [
-    {"id": "deepseek-v4-flash-free", "name": "DeepSeek V4 Flash Free"},
-    {"id": "mimo-v2.5-free", "name": "MiMo V2.5 Free"},
-    {"id": "qwen3.6-plus-free", "name": "Qwen 3.6 Plus Free"},
-    {"id": "minimax-m3-free", "name": "MiniMax M3 Free"},
-    {"id": "nemotron-3-ultra-free", "name": "Nemotron 3 Ultra Free"},
-]
-
-discovered_models: List[Dict[str, str]] = DEFAULT_FREE_MODELS.copy()
+discovered_models: List[Dict[str, Any]] = []
 _discovery_lock = threading.Lock()
+
+
+def get_default_model() -> str:
+    """Pick a model for clients that omit the field.
+
+    The environment override wins, then the first live free model. The final
+    fallback exists only for the short window before the first discovery run.
+    """
+    if DEFAULT_MODEL_OVERRIDE:
+        return DEFAULT_MODEL_OVERRIDE
+    with _discovery_lock:
+        if discovered_models:
+            return discovered_models[0]["id"]
+    return "big-pickle"
 
 LOG_FORMAT = os.environ.get("LOG_FORMAT", "text").lower()
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -490,12 +497,46 @@ else:
     )
 log = logging.getLogger("zen_server")
 
+
+def refresh_models_once() -> bool:
+    """Fetch the catalog once, keeping the last-known-good list on failure."""
+    global discovered_models
+    try:
+        new_models = fetch_free_models(MODEL_CATALOG_URL, timeout=10)
+    except Exception as e:
+        log.warning(
+            "Auto-Discovery failed (%s); keeping last-known-good list (%s).",
+            e,
+            len(discovered_models),
+        )
+        return False
+
+    if not new_models:
+        log.warning(
+            "Auto-Discovery returned no free models from %s; keeping last-known-good list (%s).",
+            MODEL_CATALOG_URL,
+            len(discovered_models),
+        )
+        return False
+
+    with _discovery_lock:
+        discovered_models = new_models
+        metrics["discovered_models_count"] = len(discovered_models)
+    log.info(
+        "Auto-Discovery refreshed: %s free model(s) from %s.",
+        len(new_models),
+        MODEL_CATALOG_URL,
+    )
+    return True
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global model_usage_stats
     init_db()
     model_usage_stats = load_metrics_from_db()
     _discovery_stop.clear()
+    await asyncio.to_thread(refresh_models_once)
     threading.Thread(target=discover_models_task, daemon=True).start()
     yield
     _close_all_sessions()
@@ -512,31 +553,9 @@ app.add_middleware(
 )
 
 def discover_models_task():
-    global discovered_models
     while not _discovery_stop.is_set():
-        try:
-            req = UrlRequest(
-                f"{TARGET_ZEN_BASE}/models",
-                headers={"Authorization": "Bearer public", "User-Agent": "Mozilla/5.0"}
-            )
-            with urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                models_data = data.get("data", [])
-                if models_data:
-                    new_models = []
-                    for m in models_data:
-                        m_id = m.get("id", "")
-                        if "free" in m_id.lower() or "zen" in m_id.lower():
-                            new_models.append({"id": m_id, "name": m_id.replace("-", " ").title()})
-                    
-                    if new_models:
-                        with _discovery_lock:
-                            discovered_models = new_models
-                            metrics["discovered_models_count"] = len(discovered_models)
-                        log.info(f"Auto-Discovery refreshed: {len(discovered_models)} active model(s) fetched.")
-        except Exception as e:
-            log.debug(f"Auto-Discovery fallback active: {e}")
-        _discovery_stop.wait(300)
+        refresh_models_once()
+        _discovery_stop.wait(MODEL_DISCOVERY_INTERVAL)
 
 class FlowContext:
     def __enter__(self):
@@ -557,7 +576,7 @@ class ChatMessage(BaseModel):
     content: str
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default="deepseek-v4-flash-free")
+    model: Optional[str] = Field(default=None)
     messages: List[ChatMessage]
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
@@ -911,18 +930,20 @@ async def health():
 @app.get("/v1/models")
 async def list_models():
     with _discovery_lock:
-        return {
-            "object": "list",
-            "data": [
-                {
-                    "id": m["id"],
-                    "object": "model",
-                    "created": 1700000000,
-                    "owned_by": "opencode"
-                }
-                for m in discovered_models
-            ]
-        }
+        models = list(discovered_models)
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": m["id"],
+                "object": "model",
+                "created": m.get("created") or int(STARTUP_TIME),
+                "owned_by": m.get("owned_by") or "opencode",
+                "name": m.get("name") or m["id"],
+            }
+            for m in models
+        ]
+    }
 
 @app.post("/v1/chat/completions")
 async def chat_completions(raw_request: Request):
@@ -936,7 +957,7 @@ async def chat_completions(raw_request: Request):
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
-    current_model = payload.get("model", "deepseek-v4-flash-free")
+    current_model = payload.get("model") or get_default_model()
     is_stream = payload.get("stream", False)
     log.info(f"Received request for model '{current_model}' (Stream: {is_stream} | Has Tools: {'tools' in payload})")
 
@@ -1069,7 +1090,7 @@ async def anthropic_messages(raw_request: Request):
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
-    model_name = body.get("model", "deepseek-v4-flash-free")
+    model_name = body.get("model") or get_default_model()
     is_stream = body.get("stream", False)
     log.info(f"Received Anthropic-format request for model '{model_name}' (Stream: {is_stream})")
 
@@ -1196,7 +1217,7 @@ async def responses_endpoint(raw_request: Request):
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
-    model_name = body.get("model", "deepseek-v4-flash-free")
+    model_name = body.get("model") or get_default_model()
     is_stream = body.get("stream", False)
     log.info(f"Received Responses API request for model '{model_name}' (Stream: {is_stream})")
 

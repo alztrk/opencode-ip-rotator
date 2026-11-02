@@ -40,7 +40,7 @@ def test_metrics_endpoint():
         log(f"FAILED to fetch metrics: {e}", "ERROR")
         return False
 
-def test_completion_request(model_name="deepseek-v4-flash-free"):
+def test_completion_request(model_name):
     log(f"Testing POST /v1/chat/completions (Model: {model_name})...")
     payload = {
         "model": model_name,
@@ -64,7 +64,7 @@ def test_completion_request(model_name="deepseek-v4-flash-free"):
         log(f"FAILED completion request: {e}", "ERROR")
         return False
 
-def test_messages_endpoint(model_name="deepseek-v4-flash-free"):
+def test_messages_endpoint(model_name):
     log(f"Testing POST /v1/messages (Anthropic format, Model: {model_name})...")
     payload = {
         "model": model_name,
@@ -97,7 +97,7 @@ def test_messages_endpoint(model_name="deepseek-v4-flash-free"):
         log(f"FAILED messages request: {e}", "ERROR")
         return False
 
-def test_responses_endpoint(model_name="deepseek-v4-flash-free"):
+def test_responses_endpoint(model_name):
     log(f"Testing POST /v1/responses (Responses API, Model: {model_name})...")
     payload = {
         "model": model_name,
@@ -122,7 +122,7 @@ def test_responses_endpoint(model_name="deepseek-v4-flash-free"):
         log(f"FAILED responses request: {e}", "ERROR")
         return False
 
-def test_streaming_completion(model_name="deepseek-v4-flash-free"):
+def test_streaming_completion(model_name):
     log(f"Testing POST /v1/chat/completions with stream=True (Model: {model_name})...")
     payload = {
         "model": model_name,

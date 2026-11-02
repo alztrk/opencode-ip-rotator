@@ -53,7 +53,7 @@ A microservice-architected Cloudflare WARP IP rotator and proxy server for OpenC
 - **Dynamic Header Forwarding:** Captures and forwards all incoming client metadata including `x-opencode-*` headers and injects `Authorization: Bearer public` credentials required by the upstream API.
 - **Verified Public IP Rotation:** Validates public IP changes via external IP lookup services to guarantee a distinct IP allocation after every disconnection cycle.
 - **Active Flow Locking:** Prevents IP rotations during active Server-Sent Events (SSE) streaming sessions to prevent connection truncation and stream drops.
-- **Dynamic Model Auto-Discovery:** Periodically queries the upstream API to discover newly available free models without requiring code changes or static lists.
+- **Dynamic Model Auto-Discovery:** Periodically queries the upstream catalog and detects free models from their pricing metadata, so newly available free models are picked up without code changes or static lists (including free models without a `free` suffix, such as `big-pickle`).
 - **Web Management Dashboard:** Includes a clean, dark-themed web interface accessible at `http://127.0.0.1:8000/dashboard` for monitoring public IP status, active connections, total rotations, and triggering manual rotations.
 
 ---
@@ -206,6 +206,8 @@ The proxy pool rotates in round-robin order across all outbound requests.
 | :--- | :--- | :--- |
 | `OPENCODE_ZEN_PORT` | `8000` | Local port for the proxy server. |
 | `OPENCODE_ZEN_HOST` | `127.0.0.1` | Host address for binding the server (`0.0.0.0` in Docker). |
+| `OPENCODE_MODELS_URL` | `https://opencode.ai/inference/v1/models` | Model catalog used for free-model auto-discovery. |
+| `OPENCODE_DEFAULT_MODEL` | first discovered free model | Model used when a client omits the `model` field. |
 | `WARP_CHECK_INTERVAL` | `15` | Health check interval in seconds. |
 | `WARP_ROTATION_INTERVAL` | `300` | Periodic IP rotation interval in seconds. |
 | `AUTO_RECYCLE_THRESHOLD` | `50` | Maximum rotations before triggering container environment refresh. |
