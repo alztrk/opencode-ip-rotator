@@ -22,7 +22,18 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTEN
 
 from curl_cffi import requests as cffi_requests
 from model_catalog import DEFAULT_MODELS_URL, fetch_free_models
-from rate_limits import classify_upstream_429
+from opencode_free import (
+    UpstreamAPIError,
+    apply_free_request_shape,
+    collect_anthropic_message,
+    collect_chat_completion,
+    collect_responses_api,
+    error_to_exception,
+    opencode_free_headers,
+    parse_sse_line,
+    session_id_from_headers,
+)
+from rate_limits import classify_upstream_429, response_payload
 from rotator import flow_lock, active_flows_count, get_public_ip, get_ip_location, rotation_count
 
 # -----------------------------------------------------------------------------
@@ -582,13 +593,99 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = None
 
-def get_realistic_headers() -> Dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer public",
-        "Accept": "application/json, text/event-stream, */*",
-        "User-Agent": "OpenCode-IP-Rotator/1.0",
-    }
+def build_upstream_headers(raw_request: Request, endpoint: str) -> Dict[str, str]:
+    session_id = session_id_from_headers(raw_request.headers)
+    project_id = raw_request.headers.get("x-opencode-project")
+    headers = opencode_free_headers(session_id, project_id)
+
+    for key, value in raw_request.headers.items():
+        lower = key.lower()
+        if lower.startswith("x-opencode-") or lower.startswith("x-session-"):
+            headers[key] = value
+
+    if endpoint == "messages":
+        client_api_key = raw_request.headers.get("x-api-key") or ""
+        if not client_api_key:
+            auth = raw_request.headers.get("authorization", "")
+            if auth.startswith("Bearer "):
+                client_api_key = auth[7:]
+        headers["x-api-key"] = client_api_key or "public"
+        headers["anthropic-version"] = raw_request.headers.get(
+            "anthropic-version", "2023-06-01"
+        )
+        for key, value in raw_request.headers.items():
+            if key.lower().startswith("anthropic-"):
+                headers[key] = value
+
+    return headers
+
+
+def response_retry_after(response) -> Optional[int]:
+    value = response.headers.get("retry-after")
+    try:
+        seconds = int(float(value)) if value else None
+    except (TypeError, ValueError):
+        seconds = None
+    return seconds if seconds is not None and seconds >= 0 else None
+
+
+def upstream_error_response(error: UpstreamAPIError) -> JSONResponse:
+    if error.kind == "free_tier":
+        status_code = 403
+        error_type = "free_tier_restricted"
+    elif error.kind == "free_usage_limit":
+        status_code = 429
+        error_type = "free_usage_limit"
+    elif error.kind == "rate_limit":
+        status_code = 429
+        error_type = "rate_limit"
+    else:
+        status_code = error.status_code or 502
+        error_type = "upstream_error"
+
+    headers = {"X-Upstream-Error": error.kind}
+    if error.retry_after is not None:
+        headers["Retry-After"] = str(error.retry_after)
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "message": error.message,
+                "type": error_type,
+                "code": status_code,
+            }
+        },
+        headers=headers,
+    )
+
+
+def upstream_status_response(response, model_name: str) -> JSONResponse:
+    """Propagate an upstream error status instead of returning it as HTTP 200."""
+    payload = response_payload(
+        response,
+        default_message=f"Upstream returned HTTP {response.status_code}.",
+    )
+    if not isinstance(payload, dict):
+        payload = {
+            "error": {
+                "message": f"Upstream returned HTTP {response.status_code}.",
+                "type": "upstream_error",
+                "code": response.status_code,
+            }
+        }
+
+    error = error_to_exception(payload, response_retry_after(response))
+    if error:
+        log.warning(
+            "Upstream error for model '%s': kind=%s status=%s message=%s",
+            model_name,
+            error.kind,
+            response.status_code,
+            error.message,
+        )
+        return upstream_error_response(error)
+
+    return JSONResponse(status_code=response.status_code, content=payload)
 
 
 SAFE_UPSTREAM_HEADERS = {
@@ -684,9 +781,9 @@ class EmptyStreamError(Exception):
     pass
 
 
-async def prepare_stream_response(response, model_name: str, session=None):
+async def prepare_stream_response(response, model_name: str, session=None, done_marker=b"\ndata: [DONE]\n\n"):
     """Validate the first stream chunk before committing the HTTP response."""
-    stream = stream_response(response, model_name, session=session)
+    stream = stream_response(response, model_name, session=session, done_marker=done_marker)
     try:
         first_chunk = await stream.__anext__()
     except Exception:
@@ -703,7 +800,7 @@ async def prepare_stream_response(response, model_name: str, session=None):
 
     return replay_stream()
 
-async def stream_response(response, model_name: str, session=None) -> AsyncGenerator[bytes, None]:
+async def stream_response(response, model_name: str, session=None, done_marker=b"\ndata: [DONE]\n\n") -> AsyncGenerator[bytes, None]:
     loop = asyncio.get_event_loop()
     global active_flows_count
 
@@ -756,6 +853,16 @@ async def stream_response(response, model_name: str, session=None) -> AsyncGener
                             has_meaningful_content = True
                             break
 
+        # Surface gate/quota errors that arrive inside an HTTP 200 stream.
+        for buffered_line in buffered_lines:
+            event = parse_sse_line(buffered_line)
+            if event:
+                api_error = error_to_exception(
+                    event, response_retry_after(response)
+                )
+                if api_error:
+                    raise api_error
+
         # If stream ended prematurely without producing any meaningful content or tool calls
         if not has_meaningful_content and len(buffered_lines) < 4:
             all_buffered = "".join([l.decode("utf-8", errors="ignore") for l in buffered_lines])
@@ -790,7 +897,8 @@ async def stream_response(response, model_name: str, session=None) -> AsyncGener
                 yield b"\n"
 
         log.info(f"Streaming completed successfully for model '{model_name}' ({chunk_count} lines sent).")
-        yield b"\ndata: [DONE]\n\n"
+        if done_marker:
+            yield done_marker
     except EmptyStreamError:
         raise
     except GeneratorExit:
@@ -958,28 +1066,26 @@ async def chat_completions(raw_request: Request):
         raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
     current_model = payload.get("model") or get_default_model()
-    is_stream = payload.get("stream", False)
-    log.info(f"Received request for model '{current_model}' (Stream: {is_stream} | Has Tools: {'tools' in payload})")
+    client_stream = bool(payload.get("stream", False))
+    payload = apply_free_request_shape(payload, "chat")
+    log.info(f"Received request for model '{current_model}' (Stream: {client_stream} | Has Tools: {'tools' in payload})")
 
-    headers = get_realistic_headers()
-    for k, v in raw_request.headers.items():
-        if k.lower().startswith("x-opencode-"):
-            headers[k] = v
+    headers = build_upstream_headers(raw_request, "chat")
 
     ip_rotation_count = 0
     for attempt in range(1, MAX_RETRIES_ON_429 + 1):
         try:
             await asyncio.sleep(random.uniform(0.1, 0.3))
             proxies = get_next_outbound_proxy()
-            session = create_fresh_session(is_stream) if is_stream else _get_session("chat")
+            session = create_fresh_session(True) if client_stream else _get_session("chat")
             response = session.post(
                 TARGET_ZEN_URL,
                 json=payload,
                 headers=headers,
                 impersonate="chrome124",
-                stream=is_stream,
+                stream=True,
                 proxies=proxies,
-                timeout=STREAM_TIMEOUT if is_stream else 120
+                timeout=STREAM_TIMEOUT
             )
             log_upstream_response(response, current_model, "chat_completions", attempt, proxies is not None)
 
@@ -1012,11 +1118,14 @@ async def chat_completions(raw_request: Request):
                 await asyncio.sleep(delay)
                 continue
 
+            if response.status_code >= 400:
+                return upstream_status_response(response, current_model)
+
             metrics["successful_requests"] += 1
             prom_requests_success.labels(model=current_model).inc()
             prom_request_duration.labels(model=current_model, endpoint="chat_completions").observe(time.time() - start_time)
 
-            if is_stream:
+            if client_stream:
                 try:
                     # Pre-verify that the response is not an empty stream before committing to StreamingResponse
                     stream_gen = await prepare_stream_response(response, current_model, session=session)
@@ -1029,6 +1138,8 @@ async def chat_completions(raw_request: Request):
                         media_type="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
                     )
+                except UpstreamAPIError as exc:
+                    return upstream_error_response(exc)
                 except EmptyStreamError:
                     if attempt >= MIN_ATTEMPTS_BEFORE_RATE_LIMIT and ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
                         ip_rotation_count += 1
@@ -1042,7 +1153,9 @@ async def chat_completions(raw_request: Request):
             else:
                 with FlowContext():
                     try:
-                        res_json = await asyncio.to_thread(response.json)
+                        res_json = await asyncio.to_thread(
+                            collect_chat_completion, response, current_model
+                        )
                         usage = res_json.get("usage", {})
                         track_token_usage(
                             current_model,
@@ -1050,15 +1163,14 @@ async def chat_completions(raw_request: Request):
                             completion_tokens=usage.get("completion_tokens", DEFAULT_COMPLETION_TOKENS)
                         )
                         return JSONResponse(content=res_json)
+                    except UpstreamAPIError as exc:
+                        return upstream_error_response(exc)
                     except Exception:
                         track_token_usage(current_model, prompt_tokens=DEFAULT_PROMPT_TOKENS, completion_tokens=DEFAULT_COMPLETION_TOKENS)
-                        return {
-                            "id": f"chatcmpl-zen-resp-{int(time.time())}",
-                            "object": "chat.completion",
-                            "created": int(time.time()),
-                            "model": current_model,
-                            "choices": [{"index": 0, "message": {"role": "assistant", "content": response.text}, "finish_reason": "stop"}]
-                        }
+                        return JSONResponse(
+                            status_code=502,
+                            content={"error": {"message": f"Upstream returned an unreadable stream for '{current_model}'.", "type": "upstream_error", "code": 502}}
+                        )
 
         except Exception as e:
             log.error(f"[Attempt {attempt}/{MAX_RETRIES_ON_429}] Connection error for model '{current_model}': {type(e).__name__}: {e}")
@@ -1066,7 +1178,7 @@ async def chat_completions(raw_request: Request):
                 await asyncio.sleep(min(2 ** attempt, BACKOFF_CAP))
             continue
 
-    if is_stream:
+    if client_stream:
         return stream_rate_limit_response(current_model)
     log.error(f"All {MAX_RETRIES_ON_429} attempts exhausted for model '{current_model}'. Returning 503.")
     return JSONResponse(
@@ -1091,37 +1203,26 @@ async def anthropic_messages(raw_request: Request):
         raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
     model_name = body.get("model") or get_default_model()
-    is_stream = body.get("stream", False)
-    log.info(f"Received Anthropic-format request for model '{model_name}' (Stream: {is_stream})")
+    client_stream = bool(body.get("stream", False))
+    body = apply_free_request_shape(body, "messages")
+    log.info(f"Received Anthropic-format request for model '{model_name}' (Stream: {client_stream})")
 
-    client_api_key = raw_request.headers.get("x-api-key") or ""
-    if not client_api_key:
-        auth = raw_request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            client_api_key = auth[7:]
-
-    headers = get_realistic_headers()
-    headers["x-api-key"] = client_api_key or "public"
-
-    for k, v in raw_request.headers.items():
-        kl = k.lower()
-        if kl.startswith("x-opencode-") or kl.startswith("anthropic-"):
-            headers[k] = v
+    headers = build_upstream_headers(raw_request, "messages")
 
     ip_rotation_count = 0
     for attempt in range(1, MAX_RETRIES_ON_429 + 1):
         try:
             await asyncio.sleep(random.uniform(0.1, 0.3))
             proxies = get_next_outbound_proxy()
-            session = create_fresh_session(is_stream) if is_stream else _get_session("anthropic")
+            session = create_fresh_session(True) if client_stream else _get_session("anthropic")
             response = session.post(
                 TARGET_ZEN_ANTHROPIC_URL,
                 json=body,
                 headers=headers,
                 impersonate="chrome124",
-                stream=is_stream,
+                stream=True,
                 proxies=proxies,
-                timeout=STREAM_TIMEOUT if is_stream else 120,
+                timeout=STREAM_TIMEOUT,
             )
             log_upstream_response(response, model_name, "messages", attempt, proxies is not None)
 
@@ -1154,13 +1255,20 @@ async def anthropic_messages(raw_request: Request):
                 await asyncio.sleep(delay)
                 continue
 
+            if response.status_code >= 400:
+                return upstream_status_response(response, model_name)
+
             metrics["successful_requests"] += 1
             prom_requests_success.labels(model=model_name).inc()
             prom_request_duration.labels(model=model_name, endpoint="anthropic_messages").observe(time.time() - start_time)
 
-            if is_stream:
+            if client_stream:
                 try:
-                    stream_gen = await prepare_stream_response(response, model_name, session=session)
+                    stream_gen = await prepare_stream_response(
+                        response, model_name, session=session, done_marker=b""
+                    )
+                except UpstreamAPIError as exc:
+                    return upstream_error_response(exc)
                 except EmptyStreamError:
                     if attempt >= MIN_ATTEMPTS_BEFORE_RATE_LIMIT and ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
                         ip_rotation_count += 1
@@ -1178,7 +1286,9 @@ async def anthropic_messages(raw_request: Request):
             else:
                 with FlowContext():
                     try:
-                        res_json = await asyncio.to_thread(response.json)
+                        res_json = await asyncio.to_thread(
+                            collect_anthropic_message, response, model_name
+                        )
                         usage = res_json.get("usage", {})
                         track_token_usage(
                             model_name,
@@ -1186,9 +1296,14 @@ async def anthropic_messages(raw_request: Request):
                             completion_tokens=usage.get("output_tokens", DEFAULT_COMPLETION_TOKENS),
                         )
                         return JSONResponse(content=res_json)
+                    except UpstreamAPIError as exc:
+                        return upstream_error_response(exc)
                     except Exception:
                         track_token_usage(model_name, prompt_tokens=DEFAULT_PROMPT_TOKENS, completion_tokens=DEFAULT_COMPLETION_TOKENS)
-                        return JSONResponse(content=response.text)
+                        return JSONResponse(
+                            status_code=502,
+                            content={"error": {"message": f"Upstream returned an unreadable stream for '{model_name}'.", "type": "upstream_error", "code": 502}}
+                        )
 
         except Exception as e:
             log.error(f"[Attempt {attempt}/{MAX_RETRIES_ON_429}] Anthropic endpoint error for model '{model_name}': {type(e).__name__}: {e}")
@@ -1196,7 +1311,7 @@ async def anthropic_messages(raw_request: Request):
                 await asyncio.sleep(min(2 ** attempt, BACKOFF_CAP))
             continue
 
-    if is_stream:
+    if client_stream:
         return stream_rate_limit_response(model_name)
     log.error(f"All {MAX_RETRIES_ON_429} attempts exhausted for Anthropic model '{model_name}'. Returning 503.")
     return JSONResponse(
@@ -1218,28 +1333,26 @@ async def responses_endpoint(raw_request: Request):
         raise HTTPException(status_code=400, detail="Request body must contain valid JSON") from exc
 
     model_name = body.get("model") or get_default_model()
-    is_stream = body.get("stream", False)
-    log.info(f"Received Responses API request for model '{model_name}' (Stream: {is_stream})")
+    client_stream = bool(body.get("stream", False))
+    body = apply_free_request_shape(body, "responses")
+    log.info(f"Received Responses API request for model '{model_name}' (Stream: {client_stream})")
 
-    headers = get_realistic_headers()
-    for k, v in raw_request.headers.items():
-        if k.lower().startswith("x-opencode-"):
-            headers[k] = v
+    headers = build_upstream_headers(raw_request, "responses")
 
     ip_rotation_count = 0
     for attempt in range(1, MAX_RETRIES_ON_429 + 1):
         try:
             await asyncio.sleep(random.uniform(0.1, 0.3))
             proxies = get_next_outbound_proxy()
-            session = create_fresh_session(is_stream) if is_stream else _get_session("responses")
+            session = create_fresh_session(True) if client_stream else _get_session("responses")
             response = session.post(
                 TARGET_ZEN_RESPONSES_URL,
                 json=body,
                 headers=headers,
                 impersonate="chrome124",
-                stream=is_stream,
+                stream=True,
                 proxies=proxies,
-                timeout=STREAM_TIMEOUT if is_stream else 120,
+                timeout=STREAM_TIMEOUT,
             )
             log_upstream_response(response, model_name, "responses", attempt, proxies is not None)
 
@@ -1272,13 +1385,20 @@ async def responses_endpoint(raw_request: Request):
                 await asyncio.sleep(delay)
                 continue
 
+            if response.status_code >= 400:
+                return upstream_status_response(response, model_name)
+
             metrics["successful_requests"] += 1
             prom_requests_success.labels(model=model_name).inc()
             prom_request_duration.labels(model=model_name, endpoint="responses").observe(time.time() - start_time)
 
-            if is_stream:
+            if client_stream:
                 try:
-                    stream_gen = await prepare_stream_response(response, model_name, session=session)
+                    stream_gen = await prepare_stream_response(
+                        response, model_name, session=session, done_marker=b""
+                    )
+                except UpstreamAPIError as exc:
+                    return upstream_error_response(exc)
                 except EmptyStreamError:
                     if attempt >= MIN_ATTEMPTS_BEFORE_RATE_LIMIT and ip_rotation_count < MAX_IP_ROTATIONS_BEFORE_RATE_LIMIT:
                         ip_rotation_count += 1
@@ -1296,10 +1416,17 @@ async def responses_endpoint(raw_request: Request):
             else:
                 with FlowContext():
                     try:
-                        res_json = await asyncio.to_thread(response.json)
+                        res_json = await asyncio.to_thread(
+                            collect_responses_api, response, model_name
+                        )
                         return JSONResponse(content=res_json)
+                    except UpstreamAPIError as exc:
+                        return upstream_error_response(exc)
                     except Exception:
-                        return JSONResponse(content=response.text)
+                        return JSONResponse(
+                            status_code=502,
+                            content={"error": {"message": f"Upstream returned an unreadable stream for '{model_name}'.", "type": "upstream_error", "code": 502}}
+                        )
 
         except Exception as e:
             log.error(f"[Attempt {attempt}/{MAX_RETRIES_ON_429}] Responses endpoint error for model '{model_name}': {type(e).__name__}: {e}")
@@ -1307,7 +1434,7 @@ async def responses_endpoint(raw_request: Request):
                 await asyncio.sleep(min(2 ** attempt, BACKOFF_CAP))
             continue
 
-    if is_stream:
+    if client_stream:
         return stream_rate_limit_response(model_name)
     log.error(f"All {MAX_RETRIES_ON_429} attempts exhausted for Responses model '{model_name}'. Returning 503.")
     return JSONResponse(
