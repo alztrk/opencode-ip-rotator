@@ -54,24 +54,8 @@ def is_free_model(model: Dict[str, Any]) -> bool:
     return _zero_price(input_cost.get("price")) and _zero_price(output_cost.get("price"))
 
 
-def normalize_model(model: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep the upstream fields the proxy and its clients actually need."""
-    api = model.get("api")
-    api = api if isinstance(api, dict) else {}
-    chat = api.get("chat-completions")
-    chat = chat if isinstance(chat, dict) else {}
-
-    return {
-        "id": model["id"],
-        "name": model.get("name") or model["id"],
-        "created": model.get("created"),
-        "owned_by": model.get("owned_by") or "opencode",
-        "base_url": chat.get("base_url"),
-    }
-
-
 def parse_free_models(payload: Any) -> List[Dict[str, Any]]:
-    """Filter a catalog payload down to normalized free chat models."""
+    """Filter a catalog payload while preserving each selected model record."""
     if not isinstance(payload, dict):
         return []
     data = payload.get("data")
@@ -92,7 +76,7 @@ def parse_free_models(payload: Any) -> List[Dict[str, Any]]:
         if not is_free_model(model):
             continue
         seen.add(model_id)
-        free_models.append(normalize_model(model))
+        free_models.append(dict(model))
     return free_models
 
 

@@ -85,15 +85,14 @@ class ParseFreeModelsTests(unittest.TestCase):
         models = parse_free_models(payload)
         self.assertEqual([m["id"] for m in models], ["big-pickle", "beam-free"])
 
-    def test_upstream_metadata_is_preserved(self):
-        payload = {"data": [free_model("big-pickle")]}
+    def test_all_upstream_model_fields_are_preserved(self):
+        source_model = free_model("big-pickle")
+        source_model["description"] = "Reasoning model"
+        source_model["limit"] = {"context": 200000, "output": 32000}
+        source_model["capabilities"] = {"tools": {"supported": True}}
+        payload = {"data": [source_model]}
         model = parse_free_models(payload)[0]
-        self.assertEqual(model["name"], "Big Pickle")
-        self.assertEqual(model["created"], 1793661778)
-        self.assertEqual(model["owned_by"], "opencode")
-        self.assertEqual(
-            model["base_url"], "https://opencode.ai/inference/openai/v1"
-        )
+        self.assertEqual(model, source_model)
 
     def test_duplicate_ids_are_removed(self):
         payload = {"data": [free_model("big-pickle"), free_model("big-pickle")]}

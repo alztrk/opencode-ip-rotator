@@ -173,7 +173,7 @@ Requests rotate across the pool in round-robin order.
 | :--- | :--- | :--- |
 | `/v1/chat/completions` | `POST` | OpenAI-compatible chat completion (streaming and non-streaming) |
 | `/v1/messages` | `POST` | Anthropic-compatible chat completion |
-| `/v1/models` | `GET` | List of currently active free models |
+| `/v1/models` | `GET` | Currently active free models with their full OpenCode catalog metadata |
 | `/dashboard` | `GET` | Web management dashboard |
 | `/metrics` | `GET` | Public IP, token metrics, and operational stats (JSON) |
 | `/health` | `GET` | Health check probe |

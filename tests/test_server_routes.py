@@ -1,4 +1,6 @@
 import unittest
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 from server import app
 
@@ -20,6 +22,24 @@ class RouteTests(unittest.TestCase):
         data = resp.json()
         self.assertEqual(data["object"], "list")
         self.assertIsInstance(data["data"], list)
+
+    def test_list_models_returns_all_upstream_model_fields(self):
+        model = {
+            "id": "big-pickle",
+            "object": "model",
+            "created": 1793661778,
+            "owned_by": "opencode",
+            "name": "Big Pickle",
+            "type": "chat",
+            "limit": {"context": 200000, "output": 32000},
+            "capabilities": {"tools": {"supported": True}},
+        }
+
+        with patch("routes.models.get_discovered_models", return_value=[model]):
+            resp = self.client.get("/v1/models")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"object": "list", "data": [model]})
 
     def test_chat_completions_requires_json(self):
         resp = self.client.post(
