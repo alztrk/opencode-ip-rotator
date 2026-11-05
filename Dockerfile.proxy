@@ -17,7 +17,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy server code, rotator helper, and dashboard template
+# Copy server code, packages, and templates
+COPY core/ ./core/
+COPY routes/ ./routes/
+COPY services/ ./services/
 COPY server.py .
 COPY model_catalog.py .
 COPY opencode_free.py .

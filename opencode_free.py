@@ -19,6 +19,7 @@ import json
 import os
 import re
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 OPENCODE_CHANNEL = os.environ.get("OPENCODE_CLIENT_CHANNEL", "latest")
@@ -81,7 +82,8 @@ def generate_session_id(seed: str = "", timestamp_ms: Optional[int] = None) -> s
     time_hex = "".join(f"{(value >> (40 - 8 * index)) & 0xFF:02x}" for index in range(6))
 
     chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    digest = hashlib.sha256(f"{seed}:opencode_free_session".encode("utf-8")).digest()
+    effective_seed = uuid.uuid4().hex if not seed else seed
+    digest = hashlib.sha256(f"{effective_seed}:opencode_free_session".encode("utf-8")).digest()
     random_part = "".join(chars[byte % 62] for byte in digest[:14])
     return f"ses_{time_hex}{random_part}"
 

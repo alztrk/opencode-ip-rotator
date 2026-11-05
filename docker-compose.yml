@@ -4,25 +4,22 @@ services:
       context: .
       dockerfile: Dockerfile.proxy
     container_name: opencode_proxy_server
-    # Shares the WARP network namespace. This makes the proxy's own outbound
-    # requests use the same egress path that the rotator verifies.
-    network_mode: "service:warp-rotator"
-    depends_on:
-      warp-rotator:
-        condition: service_healthy
+    ports:
+      - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./proxies.txt:/app/data/proxies.txt:ro
     restart: unless-stopped
+    networks:
+      - rotator-net
     environment:
-      - OPENCODE_ZEN_PORT=8000
-      - OPENCODE_ZEN_HOST=0.0.0.0
-      - OPENCODE_ZEN_TARGET_BASE=https://opencode.ai/zen/v1
+      - PORT=8000
+      - OPENCODE_ZEN_TARGET_BASE=https://opencode.ai/inference/openai/v1
       - PROXY_LIST_FILE=/app/data/proxies.txt
       - PROXY_LIST=${PROXY_LIST:-}
-      - WARP_ROTATOR_URL=http://127.0.0.1:8001
-      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://127.0.0.1:8000,http://localhost:8000}
-      - LOG_LEVEL=DEBUG
+      - WARP_ROTATOR_URL=http://warp-rotator:8001
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://127.0.0.1:8000,http://localhost:8000,*}
+      - LOG_LEVEL=INFO
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -36,13 +33,15 @@ services:
       dockerfile: Dockerfile.warp
     container_name: opencode_warp_rotator
     ports:
-      - "8000:8000"
+      - "8001:8001"
     privileged: true
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
+    networks:
+      - rotator-net
     environment:
       - WARP_CHECK_ENDPOINT=https://opencode.ai
       - WARP_CHECK_INTERVAL=15
@@ -59,3 +58,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+
+networks:
+  rotator-net:
+    driver: bridge

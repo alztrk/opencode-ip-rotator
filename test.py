@@ -34,7 +34,7 @@ def test_metrics_endpoint():
                 loc = data.get("location", {})
                 flag = loc.get("flag", "")
                 country = loc.get("country", "")
-                log(f"SUCCESS: Verified Public IP: {ip} {flag} ({country})", "OK")
+                log(f"SUCCESS: Verified Public IP: {ip} ({country})", "OK")
                 return True
     except Exception as e:
         log(f"FAILED to fetch metrics: {e}", "ERROR")

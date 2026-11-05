@@ -29,3 +29,5 @@ proxies.txt
 # Cloned reference repos
 opencode-src/
 opencode-src-shallow/
+
+server.*
