@@ -25,19 +25,25 @@ def load_proxy_list(force: bool = False) -> None:
     global _proxy_pool, _last_proxy_mtime
     with _proxy_lock:
         proxies = []
-        if PROXY_LIST_FILE.exists():
-            try:
-                mtime = PROXY_LIST_FILE.stat().st_mtime
-                if not force and mtime == _last_proxy_mtime and _proxy_pool:
-                    return
-                _last_proxy_mtime = mtime
-                with open(PROXY_LIST_FILE, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            proxies.append(_normalize_proxy(line))
-            except Exception as e:
-                log.error("Error reading proxy file %s: %s", PROXY_LIST_FILE, e)
+        files_to_check = [PROXY_LIST_FILE]
+        root_file = Path(__file__).resolve().parent.parent / "proxies.txt"
+        if root_file != PROXY_LIST_FILE and root_file.exists():
+            files_to_check.append(root_file)
+
+        for p_file in files_to_check:
+            if p_file.exists():
+                try:
+                    mtime = p_file.stat().st_mtime
+                    if not force and mtime == _last_proxy_mtime and _proxy_pool:
+                        return
+                    _last_proxy_mtime = mtime
+                    with open(p_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#"):
+                                proxies.append(_normalize_proxy(line))
+                except Exception as e:
+                    log.error("Error reading proxy file %s: %s", p_file, e)
 
         env_proxies = os.environ.get("PROXY_LIST", "").strip()
         if env_proxies:

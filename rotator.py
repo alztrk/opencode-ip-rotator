@@ -39,35 +39,42 @@ def load_proxy_list(force: bool = False) -> None:
     """Load proxy list from file and environment variable with hot-reloading."""
     global _proxy_pool, _proxy_index, _last_proxy_mtime
     with _proxy_lock:
-        proxy_file = Path(PROXY_LIST_FILE)
-        if proxy_file.exists():
-            try:
-                mtime = proxy_file.stat().st_mtime
-                if not force and mtime == _last_proxy_mtime and _proxy_pool:
-                    return
-                _last_proxy_mtime = mtime
-                lines = []
-                with open(proxy_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            if "://" not in line:
-                                line = f"http://{line}"
-                            lines.append(line)
-                if PROXY_LIST_ENV:
-                    for p in PROXY_LIST_ENV.split(","):
-                        p = p.strip()
-                        if p:
-                            if "://" not in p:
-                                p = f"http://{p}"
-                            lines.append(p)
-                _proxy_pool = list(dict.fromkeys(lines))
-                _proxy_index = 0
-                if _proxy_pool:
-                    log.info(f"Loaded {len(_proxy_pool)} proxies into rotation pool.")
-            except Exception as e:
-                log.error(f"Error reading proxy list file {PROXY_LIST_FILE}: {e}")
-        elif PROXY_LIST_ENV:
+        lines = []
+        files_to_check = [Path(PROXY_LIST_FILE)]
+        root_file = Path(__file__).resolve().parent / "proxies.txt"
+        if root_file != files_to_check[0] and root_file.exists():
+            files_to_check.append(root_file)
+
+        for proxy_file in files_to_check:
+            if proxy_file.exists():
+                try:
+                    mtime = proxy_file.stat().st_mtime
+                    if not force and mtime == _last_proxy_mtime and _proxy_pool:
+                        return
+                    _last_proxy_mtime = mtime
+                    with open(proxy_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#"):
+                                if "://" not in line:
+                                    line = f"http://{line}"
+                                lines.append(line)
+                except Exception as e:
+                    log.error(f"Error reading proxy list file {proxy_file}: {e}")
+
+        if PROXY_LIST_ENV:
+            for p in PROXY_LIST_ENV.split(","):
+                p = p.strip()
+                if p:
+                    if "://" not in p:
+                        p = f"http://{p}"
+                    lines.append(p)
+
+        _proxy_pool = list(dict.fromkeys(lines))
+        _proxy_index = 0
+        if _proxy_pool:
+            log.info(f"Loaded {len(_proxy_pool)} proxies into rotation pool.")
+        if False:
             lines = []
             for p in PROXY_LIST_ENV.split(","):
                 p = p.strip()
