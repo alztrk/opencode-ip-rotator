@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from model_catalog import fetch_free_models, is_free_model, parse_free_models
+from services.discovery import fetch_free_models, is_free_model, parse_free_models
 
 
 def free_model(model_id="big-pickle", **overrides):

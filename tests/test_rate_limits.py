@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import rotator
-from rate_limits import classify_upstream_429
+from services.upstream import classify_upstream_429
 
 
 class FakeResponse:

@@ -7,13 +7,13 @@ from core.config import (
     CHAT_COMPLETIONS_URL,
     RESPONSES_URL,
 )
-from opencode_free import (
+from services.upstream import (
     apply_free_request_shape,
     collect_anthropic_message,
     collect_chat_completion,
     collect_responses_api,
+    forward_upstream_request,
 )
-from services.upstream import forward_upstream_request
 
 log = logging.getLogger("routes.chat")
 router = APIRouter()

@@ -1,7 +1,7 @@
 import json
 import unittest
 
-import opencode_free as free_tier
+import services.upstream as free_tier
 
 
 class FakeResponse:

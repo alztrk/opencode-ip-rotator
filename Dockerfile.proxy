@@ -22,9 +22,6 @@ COPY core/ ./core/
 COPY routes/ ./routes/
 COPY services/ ./services/
 COPY server.py .
-COPY model_catalog.py .
-COPY opencode_free.py .
-COPY rate_limits.py .
 COPY rotator.py .
 COPY templates/ ./templates/
 
