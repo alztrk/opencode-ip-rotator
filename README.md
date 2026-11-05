@@ -87,18 +87,44 @@ opencode-ip-rotator/
 
 ### OpenCode (`~/.config/opencode/opencode.jsonc`)
 
-Add the local proxy as an OpenAI-compatible provider:
+#### Modern Schema (`providers`)
+
+Add the local proxy using the current OpenCode provider schema:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "opencode-ip-rotator": {
+      "name": "OpenCode IP Rotator",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:8000/v1"
+      },
+      "models": {
+        "big-pickle": {
+          "name": "Big Pickle"
+        }
+      }
+    }
+  }
+}
+```
+
+#### Legacy Schema (`provider`)
+
+For older OpenCode installations using the deprecated `@ai-sdk` schema:
 
 ```jsonc
 {
   "provider": {
-    "opencode-zen-local": {
+    "opencode-ip-rotator": {
       "npm": "@ai-sdk/openai-compatible",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
         "apiKey": "any"
       },
-      "name": "OpenCode Zen Local Proxy"
+      "name": "OpenCode IP Rotator"
     }
   }
 }
