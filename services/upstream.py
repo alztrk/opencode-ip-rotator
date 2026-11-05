@@ -155,7 +155,7 @@ def build_upstream_headers(raw_request: Request, endpoint: str) -> Dict[str, str
     for key, value in raw_request.headers.items():
         lower = key.lower()
         if lower.startswith("x-opencode-") or lower.startswith("x-session-"):
-            headers[key] = value
+            headers[lower] = value
 
     if endpoint == "messages":
         client_api_key = raw_request.headers.get("x-api-key") or ""
@@ -168,8 +168,9 @@ def build_upstream_headers(raw_request: Request, endpoint: str) -> Dict[str, str
             "anthropic-version", "2023-06-01"
         )
         for key, value in raw_request.headers.items():
-            if key.lower().startswith("anthropic-"):
-                headers[key] = value
+            lower = key.lower()
+            if lower.startswith("anthropic-"):
+                headers[lower] = value
 
     return headers
 

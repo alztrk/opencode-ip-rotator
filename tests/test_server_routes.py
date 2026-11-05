@@ -44,3 +44,9 @@ class RouteTests(unittest.TestCase):
             headers={"Content-Type": "application/json"},
         )
         self.assertEqual(resp.status_code, 400)
+
+    def test_proxy_pool_normalization(self):
+        from services.proxy_pool import _normalize_proxy
+        self.assertEqual(_normalize_proxy("1.2.3.4:8080"), "http://1.2.3.4:8080")
+        self.assertEqual(_normalize_proxy("http://1.2.3.4:8080"), "http://1.2.3.4:8080")
+        self.assertEqual(_normalize_proxy("socks5://1.2.3.4:1080"), "socks5://1.2.3.4:1080")

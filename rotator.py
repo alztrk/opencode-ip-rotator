@@ -27,43 +27,66 @@ AUTO_RECYCLE_THRESHOLD = int(os.environ.get("AUTO_RECYCLE_THRESHOLD", "50"))
 CUSTOM_OUTBOUND_PROXY = os.environ.get("CUSTOM_OUTBOUND_PROXY", "").strip()
 
 # Proxy Pool Configuration
-PROXY_LIST_FILE = os.environ.get("PROXY_LIST_FILE", "/app/data/proxies.txt")
+DEFAULT_DATA_DIR = Path("/app/data") if Path("/.dockerenv").exists() else Path(__file__).resolve().parent / "data"
+PROXY_LIST_FILE = os.environ.get("PROXY_LIST_FILE", str(DEFAULT_DATA_DIR / "proxies.txt"))
 PROXY_LIST_ENV = os.environ.get("PROXY_LIST", "").strip()
 _proxy_pool: List[str] = []
 _proxy_index = 0
 _proxy_lock = threading.Lock()
+_last_proxy_mtime: float = 0.0
 
-def load_proxy_list() -> None:
-    """Load proxy list from file and environment variable."""
-    global _proxy_pool, _proxy_index
-    proxies = []
-    
-    # Load from file
-    proxy_file = Path(PROXY_LIST_FILE)
-    if proxy_file.exists():
-        try:
-            with open(proxy_file, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-                proxies.extend(lines)
-        except Exception as e:
-            log.error(f"Error reading proxy list file {PROXY_LIST_FILE}: {e}")
-    
-    # Load from environment variable
-    if PROXY_LIST_ENV:
-        proxies.extend([p.strip() for p in PROXY_LIST_ENV.split(",") if p.strip()])
-    
-    # Deduplicate while preserving order
-    _proxy_pool = list(dict.fromkeys(proxies))
-    _proxy_index = 0
-    
-    if _proxy_pool:
-        log.info(f"Loaded {len(_proxy_pool)} proxies into rotation pool.")
-    else:
-        log.info("No proxies configured. WARP rotation will be the only IP rotation method.")
+def load_proxy_list(force: bool = False) -> None:
+    """Load proxy list from file and environment variable with hot-reloading."""
+    global _proxy_pool, _proxy_index, _last_proxy_mtime
+    with _proxy_lock:
+        proxy_file = Path(PROXY_LIST_FILE)
+        if proxy_file.exists():
+            try:
+                mtime = proxy_file.stat().st_mtime
+                if not force and mtime == _last_proxy_mtime and _proxy_pool:
+                    return
+                _last_proxy_mtime = mtime
+                lines = []
+                with open(proxy_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            if "://" not in line:
+                                line = f"http://{line}"
+                            lines.append(line)
+                if PROXY_LIST_ENV:
+                    for p in PROXY_LIST_ENV.split(","):
+                        p = p.strip()
+                        if p:
+                            if "://" not in p:
+                                p = f"http://{p}"
+                            lines.append(p)
+                _proxy_pool = list(dict.fromkeys(lines))
+                _proxy_index = 0
+                if _proxy_pool:
+                    log.info(f"Loaded {len(_proxy_pool)} proxies into rotation pool.")
+            except Exception as e:
+                log.error(f"Error reading proxy list file {PROXY_LIST_FILE}: {e}")
+        elif PROXY_LIST_ENV:
+            lines = []
+            for p in PROXY_LIST_ENV.split(","):
+                p = p.strip()
+                if p:
+                    if "://" not in p:
+                        p = f"http://{p}"
+                    lines.append(p)
+            _proxy_pool = list(dict.fromkeys(lines))
+            _proxy_index = 0
+            if _proxy_pool:
+                log.info(f"Loaded {len(_proxy_pool)} proxies into rotation pool.")
+        else:
+            _proxy_pool = []
+            _proxy_index = 0
 
 def get_next_proxy() -> Optional[Dict[str, str]]:
     """Get the next proxy from the pool in round-robin fashion."""
     global _proxy_index
+    load_proxy_list()
     with _proxy_lock:
         if not _proxy_pool:
             return None
@@ -101,7 +124,7 @@ active_flows_count = 0
 flow_lock = threading.Lock()
 _current_ip: Optional[str] = None
 rotation_count = 0
-FLOW_LEASE_DB_PATH = Path(os.environ.get("METRICS_DB_PATH", "/app/data/metrics.db"))
+FLOW_LEASE_DB_PATH = Path(os.environ.get("METRICS_DB_PATH", str(DEFAULT_DATA_DIR / "metrics.db")))
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -244,9 +267,16 @@ def rotate_warp(reason: str = "Triggered") -> bool:
                         time.sleep(1)
 
                         subprocess.run([warp_bin, "--accept-tos", "registration", "delete"], capture_output=True, text=True, timeout=10, check=False)
-                        time.sleep(1)
+                        for _ in range(10):
+                            time.sleep(0.3)
+                            chk = subprocess.run([warp_bin, "--accept-tos", "registration", "show"], capture_output=True, text=True, check=False)
+                            if "Missing registration" in chk.stderr or "Missing registration" in chk.stdout:
+                                break
                         subprocess.run([warp_bin, "--accept-tos", "registration", "new"], capture_output=True, text=True, timeout=10, check=False)
-                        time.sleep(1)
+                        time.sleep(0.5)
+                        if not Path("/.dockerenv").exists():
+                            subprocess.run([warp_bin, "--accept-tos", "mode", "proxy"], capture_output=True, text=True, timeout=10, check=False)
+                            time.sleep(0.3)
 
                         res = subprocess.run([warp_bin, "--accept-tos", "connect"], capture_output=True, text=True, timeout=10, check=False)
 

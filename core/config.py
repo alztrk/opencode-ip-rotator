@@ -25,13 +25,22 @@ TLS12_CIPHERS = (
 )
 
 # Operational settings
+DEFAULT_DATA_DIR = (
+    Path("/app/data")
+    if Path("/.dockerenv").exists()
+    else Path(__file__).resolve().parent.parent / "data"
+)
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "big-pickle")
 DEFAULT_MODEL_OVERRIDE = os.environ.get("OPENCODE_DEFAULT_MODEL", "").strip()
 MODEL_DISCOVERY_INTERVAL = int(os.environ.get("MODEL_DISCOVERY_INTERVAL", "300"))
 STREAM_TIMEOUT = int(os.environ.get("STREAM_TIMEOUT", "120"))
 WARP_ROTATOR_URL = os.environ.get("WARP_ROTATOR_URL", "http://warp-rotator:8001")
-METRICS_DB_PATH = Path(os.environ.get("METRICS_DB_PATH", "data/metrics.db"))
-PROXY_LIST_FILE = Path(os.environ.get("PROXY_LIST_FILE", "data/proxies.txt"))
+METRICS_DB_PATH = Path(
+    os.environ.get("METRICS_DB_PATH", str(DEFAULT_DATA_DIR / "metrics.db"))
+)
+PROXY_LIST_FILE = Path(
+    os.environ.get("PROXY_LIST_FILE", str(DEFAULT_DATA_DIR / "proxies.txt"))
+)
 CORS_ALLOW_ORIGINS = [
     origin.strip()
     for origin in os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",")
