@@ -27,7 +27,6 @@ RUN curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor
 WORKDIR /app
 
 COPY rotator.py .
-COPY manager.py .
 
 RUN echo '#!/bin/bash\n\
 service dbus start\n\
