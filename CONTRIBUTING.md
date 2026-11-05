@@ -11,7 +11,7 @@ Thank you for considering contributing to `opencode-ip-rotator`. Please read thr
 ## Submitting Pull Requests
 
 1. Fork the repository and create a new feature branch from `master`.
-2. Make your changes and test using `python test.py` and `docker compose up -d --build`.
+2. Make your changes and test using `pytest`, `python test.py`, and `docker compose up -d --build`.
 3. Commit with concise, descriptive commit messages (e.g. `feat: add retry backoff logic`, `fix: resolve SQLite lock issue`).
 4. Submit a Pull Request targeting the `master` branch with a summary of changes.
 
