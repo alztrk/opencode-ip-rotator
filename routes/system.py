@@ -1,13 +1,17 @@
+import asyncio
+import json
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict
+from urllib.request import Request as URLRequest, urlopen
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from core.config import WARP_ROTATOR_URL
 from core.db import get_recent_ips, load_all_usage
 from core.metrics import STARTUP_TIME, metrics
 from rotator import get_ip_location, get_public_ip, rotation_count
@@ -15,6 +19,19 @@ from services.discovery import get_discovered_models
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path("templates")))
+
+
+def _get_warp_status() -> Dict[str, Any] | None:
+    try:
+        request = URLRequest(
+            f"{WARP_ROTATOR_URL.rstrip('/')}/status",
+            headers={"Accept": "application/json"},
+        )
+        with urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 @router.get("/health")
@@ -66,6 +83,10 @@ async def dashboard_stats():
     ip = get_public_ip()
     loc = get_ip_location(ip) if ip != "Unknown" else {}
     models = get_discovered_models()
+    warp_status = await asyncio.to_thread(_get_warp_status)
+    rotation_count = warp_status.get("rotations") if warp_status else None
+    if not isinstance(rotation_count, int) or isinstance(rotation_count, bool):
+        rotation_count = None
     return {
         "verified_ip": ip,
         "location": loc,
@@ -73,6 +94,7 @@ async def dashboard_stats():
         "successful_requests": metrics["successful_requests"],
         "rate_limited_requests": metrics["rate_limited_requests"],
         "rotation_count": rotation_count,
+        "rotator_status": "online" if rotation_count is not None else "unavailable",
         "uptime_seconds": int(time.time() - STARTUP_TIME),
         "active_models_count": len(models),
         "models": models,

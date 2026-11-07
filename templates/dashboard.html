@@ -1,249 +1,256 @@
-<!DOCTYPE html>
-<html lang="en" class="h-full bg-slate-50/50">
+<!doctype html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f5f2">
     <title>OpenCode IP Rotator</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'monospace'],
-                    }
-                }
-            }
+    <style>
+        :root {
+            color-scheme: light;
+            font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
+            color: #202824;
+            background: #f4f5f2;
+            font-synthesis: none;
+            text-rendering: optimizeLegibility;
+            --muted: #65716b;
+            --line: #dce1dc;
+            --surface: #fff;
+            --warning: #a45b18;
         }
-    </script>
+
+        * { box-sizing: border-box; }
+        body { min-width: 320px; min-height: 100vh; margin: 0; }
+        button, table { font: inherit; }
+        .shell { width: min(100% - 40px, 960px); margin-inline: auto; }
+        header { border-bottom: 1px solid var(--line); background: var(--surface); }
+        .topbar { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+        .brand { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -0.02em; }
+        .status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+        .status-mark { width: 8px; height: 8px; border-radius: 50%; background: #748078; }
+        .status[data-state="online"] .status-mark { background: #33815d; }
+        .status[data-state="unavailable"] .status-mark,
+        .status[data-state="error"] .status-mark { background: #b75c43; }
+        main { padding-block: 42px 64px; }
+        .intro { margin-bottom: 26px; }
+        h1 { margin: 0; font-size: clamp(23px, 4vw, 30px); line-height: 1.2; letter-spacing: -0.035em; }
+        .intro p { margin: 8px 0 0; color: var(--muted); font-size: 14px; }
+        .overview { display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(110px, 1fr)); overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+        .overview-item { min-width: 0; padding: 20px; }
+        .overview-item + .overview-item { border-left: 1px solid var(--line); }
+        .label { margin: 0 0 10px; color: var(--muted); font-size: 12px; font-weight: 550; }
+        .value { margin: 0; font-size: 24px; line-height: 1.25; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.03em; }
+        .value.mono { overflow-wrap: anywhere; font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace; font-size: 19px; letter-spacing: -0.04em; }
+        .detail { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+        .warning { color: var(--warning); }
+        .sections { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.9fr); gap: 18px; margin-top: 24px; }
+        .panel { min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+        .panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 17px 18px 13px; }
+        h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -0.015em; }
+        .panel-note { color: var(--muted); font-size: 12px; }
+        .table-wrap { width: 100%; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+        th, td { padding: 11px 18px; border-top: 1px solid #edf0ed; }
+        th { color: var(--muted); font-size: 11px; font-weight: 550; }
+        td { font-variant-numeric: tabular-nums; }
+        th:last-child, td:last-child { text-align: right; }
+        .model-name { overflow-wrap: anywhere; font-weight: 550; }
+        .empty { padding: 20px 18px; border-top: 1px solid #edf0ed; color: var(--muted); font-size: 13px; line-height: 1.5; }
+        .history { margin: 0; padding: 0 18px; list-style: none; }
+        .history-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 12px; padding: 13px 0; border-top: 1px solid #edf0ed; }
+        .history-ip { min-width: 0; overflow-wrap: anywhere; font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace; font-size: 13px; }
+        .history-place, .history-time { color: var(--muted); font-size: 12px; }
+        .history-time { grid-column: 1 / -1; }
+        .message { min-height: 20px; margin: 18px 0 0; color: var(--muted); font-size: 12px; }
+        .message[data-state="error"] { color: #9a3e2b; }
+
+        @media (max-width: 720px) {
+            .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .overview-item + .overview-item { border-left: 0; }
+            .overview-item:nth-child(even) { border-left: 1px solid var(--line); }
+            .overview-item:nth-child(n + 3) { border-top: 1px solid var(--line); }
+            .sections { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 420px) {
+            .shell { width: min(100% - 28px, 960px); }
+            main { padding-top: 30px; }
+            .overview-item { padding: 15px; }
+            .value { font-size: 21px; }
+            .value.mono { font-size: 16px; }
+            .panel-heading { padding-inline: 14px; }
+            th, td { padding-inline: 14px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { scroll-behavior: auto !important; }
+        }
+    </style>
 </head>
-<body class="h-full text-slate-900 font-sans antialiased selection:bg-slate-900 selection:text-white">
-    <header class="bg-white/80 backdrop-blur-md border-b border-slate-200/80 sticky top-0 z-50">
-        <div class="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
-            <div class="flex items-center space-x-3">
-                <div class="w-7 h-7 bg-slate-900 text-white rounded-md flex items-center justify-center font-semibold text-xs tracking-wider">OP</div>
-                <div class="flex items-center space-x-2">
-                    <span class="font-semibold text-sm tracking-tight text-slate-900">opencode-ip-rotator</span>
-                    <span class="text-[10px] bg-slate-100 text-slate-600 font-mono font-medium px-2 py-0.5 rounded border border-slate-200">v3.0</span>
-                </div>
-            </div>
-            <div class="flex items-center space-x-3">
-                <div class="flex items-center space-x-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200/60 text-xs px-2.5 py-1 rounded-full font-medium">
-                    <span class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span>
-                    <span class="text-[11px]">Active</span>
-                </div>
-                <button id="rotate-btn" onclick="rotateNow()" class="inline-flex items-center justify-center bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium h-8 px-3 rounded-md transition-all shadow-sm active:scale-95">Rotate IP</button>
+<body>
+    <header>
+        <div class="shell topbar">
+            <p class="brand">OpenCode IP Rotator</p>
+            <div id="service-status" class="status" data-state="loading" role="status" aria-live="polite">
+                <span class="status-mark" aria-hidden="true"></span>
+                <span id="service-status-text">Connecting</span>
             </div>
         </div>
     </header>
 
-    <main class="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-            <div class="bg-white border border-slate-200/80 rounded-xl p-4 shadow-sm space-y-1">
-                <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Verified IP</p>
-                <div class="flex items-center space-x-2">
-                    <span id="flag" class="text-base">&#x1F310;</span>
-                    <span id="ip" class="text-base font-bold font-mono text-slate-900 tracking-tight">Loading...</span>
-                </div>
-                <p id="location" class="text-xs text-slate-500 font-medium truncate pt-0.5">Detecting location...</p>
-            </div>
-            <div class="bg-white border border-slate-200/80 rounded-xl p-4 shadow-sm space-y-1">
-                <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Total Calls</p>
-                <p id="requests" class="text-xl font-bold font-mono text-slate-900">0</p>
-                <p class="text-xs text-slate-400">Proxied AI completions</p>
-            </div>
-            <div class="bg-white border border-slate-200/80 rounded-xl p-4 shadow-sm space-y-1">
-                <p class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Rotations / 429s</p>
-                <div class="flex items-baseline space-x-1.5 font-mono">
-                    <span id="rotations" class="text-xl font-bold text-slate-900">0</span>
-                    <span class="text-slate-300 text-sm">/</span>
-                    <span id="ratelimits" class="text-base font-semibold text-amber-600">0</span>
-                </div>
-                <p class="text-xs text-slate-400">WARP cycles / Bypassed</p>
-            </div>
-            <div class="bg-emerald-50/40 border border-emerald-200/60 rounded-xl p-4 shadow-sm space-y-1">
-                <p class="text-[11px] font-medium text-emerald-700 uppercase tracking-wider">Est. Saved Value</p>
-                <p id="total-saved" class="text-xl font-bold font-mono text-emerald-600">$0.0000</p>
-                <p class="text-xs text-emerald-600/80">Equivalent OpenCode cost</p>
-            </div>
+    <main class="shell">
+        <div class="intro">
+            <h1>Network overview</h1>
+            <p>Current traffic and IP rotation activity.</p>
         </div>
 
-        <div class="bg-white border border-slate-200/80 rounded-xl shadow-sm overflow-hidden">
-            <div class="px-5 py-3.5 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                <div><h2 class="text-xs font-semibold text-slate-900 uppercase tracking-wider">Model Usage Breakdown</h2></div>
-                <span id="model-count-badge" class="bg-white text-slate-600 text-[11px] font-mono font-medium px-2 py-0.5 rounded border border-slate-200">0 Active</span>
+        <section class="overview" aria-label="Current network metrics">
+            <div class="overview-item">
+                <p class="label">Public IP</p>
+                <p id="ip" class="value mono">Loading</p>
+                <p id="location" class="detail">Checking location</p>
             </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs">
-                    <thead class="bg-slate-50/60 text-slate-400 font-medium uppercase border-b border-slate-100 text-[10px] tracking-wider">
-                        <tr><th class="px-5 py-2.5">Model</th><th class="px-5 py-2.5">Requests</th><th class="px-5 py-2.5">Prompt Tokens</th><th class="px-5 py-2.5">Completion Tokens</th><th class="px-5 py-2.5">Total Tokens</th><th class="px-5 py-2.5 text-right">Saved USD</th></tr>
-                    </thead>
-                    <tbody id="usage-table-body" class="divide-y divide-slate-100 font-mono text-slate-700">
-                        <tr><td colspan="6" class="px-5 py-6 text-center text-slate-400 italic font-sans text-xs">No active completions logged yet. Send prompts from OpenCode to track live metrics.</td></tr>
-                    </tbody>
-                </table>
+            <div class="overview-item">
+                <p class="label">Requests</p>
+                <p id="requests" class="value">—</p>
+                <p class="detail">Since service start</p>
             </div>
-            <div class="px-5 py-2.5 border-t border-slate-100 bg-slate-50/40 flex items-center justify-between text-xs text-slate-500 font-sans">
-                <span id="model-page-info">Page 1 of 1</span>
-                <div class="flex items-center space-x-1">
-                    <button id="model-prev-btn" onclick="changeModelPage(-1)" class="px-2 py-1 border border-slate-200 rounded text-[11px] bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">Previous</button>
-                    <button id="model-next-btn" onclick="changeModelPage(1)" class="px-2 py-1 border border-slate-200 rounded text-[11px] bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+            <div class="overview-item">
+                <p class="label">WARP rotations</p>
+                <p id="rotations" class="value">—</p>
+                <p class="detail">Since rotator start</p>
+            </div>
+            <div class="overview-item">
+                <p class="label">429 responses</p>
+                <p id="ratelimits" class="value warning">—</p>
+                <p class="detail">Rate limit responses</p>
+            </div>
+        </section>
+
+        <div class="sections">
+            <section class="panel" aria-labelledby="usage-heading">
+                <div class="panel-heading">
+                    <h2 id="usage-heading">Model usage</h2>
+                    <span id="model-count" class="panel-note">—</span>
                 </div>
-            </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th scope="col">Model</th><th scope="col">Requests</th><th scope="col">Tokens</th></tr>
+                        </thead>
+                        <tbody id="usage-table-body"></tbody>
+                    </table>
+                </div>
+                <p id="usage-empty" class="empty">No model usage recorded yet.</p>
+            </section>
+
+            <section class="panel" aria-labelledby="history-heading">
+                <div class="panel-heading">
+                    <h2 id="history-heading">Recent IP changes</h2>
+                    <span class="panel-note">Latest 10</span>
+                </div>
+                <ul id="ip-history" class="history"></ul>
+                <p id="history-empty" class="empty">No IP changes recorded yet.</p>
+            </section>
         </div>
 
-        <div class="bg-white border border-slate-200/80 rounded-xl shadow-sm overflow-hidden">
-            <div class="px-5 py-3.5 border-b border-slate-100 bg-slate-50/50"><h2 class="text-xs font-semibold text-slate-900 uppercase tracking-wider">IP Rotation Log</h2></div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs">
-                    <thead class="bg-slate-50/60 text-slate-400 font-medium uppercase border-b border-slate-100 text-[10px] tracking-wider">
-                        <tr><th class="px-5 py-2.5">Time</th><th class="px-5 py-2.5">Assigned IP</th><th class="px-5 py-2.5">Country</th><th class="px-5 py-2.5 text-right">Reason</th></tr>
-                    </thead>
-                    <tbody id="ip-history-body" class="divide-y divide-slate-100 font-mono text-slate-700">
-                        <tr><td colspan="4" class="px-5 py-6 text-center text-slate-400 italic font-sans text-xs">No rotation history recorded.</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <div class="px-5 py-2.5 border-t border-slate-100 bg-slate-50/40 flex items-center justify-between text-xs text-slate-500 font-sans">
-                <span id="ip-page-info">Page 1 of 1</span>
-                <div class="flex items-center space-x-1">
-                    <button id="ip-prev-btn" onclick="changeIpPage(-1)" class="px-2 py-1 border border-slate-200 rounded text-[11px] bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">Previous</button>
-                    <button id="ip-next-btn" onclick="changeIpPage(1)" class="px-2 py-1 border border-slate-200 rounded text-[11px] bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="bg-white border border-slate-200/80 rounded-xl shadow-sm overflow-hidden">
-            <div class="px-5 py-3.5 border-b border-slate-100 bg-slate-50/50"><h2 class="text-xs font-semibold text-slate-900 uppercase tracking-wider">WARP Quality Metrics</h2></div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs">
-                    <thead class="bg-slate-50/60 text-slate-400 font-medium uppercase border-b border-slate-100 text-[10px] tracking-wider">
-                        <tr><th class="px-5 py-2.5">Metric</th><th class="px-5 py-2.5 text-right">Value</th></tr>
-                    </thead>
-                    <tbody id="warp-quality-body" class="divide-y divide-slate-100 font-mono text-slate-700">
-                        <tr><td colspan="2" class="px-5 py-6 text-center text-slate-400 italic font-sans text-xs">No rotation data yet.</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+        <p id="dashboard-message" class="message" role="status" aria-live="polite"></p>
     </main>
 
     <script>
-        const PAGE_SIZE = 5;
-        let currentModelPage = 1;
-        let currentIpPage = 1;
-        let cachedModelKeys = [];
-        let cachedUsageData = {};
-        let cachedIpHistory = [];
+        const numberFormat = new Intl.NumberFormat();
+        const usageBody = document.getElementById("usage-table-body");
+        const historyList = document.getElementById("ip-history");
 
-        function renderModelTable() {
-            const tableBody = document.getElementById('usage-table-body');
-            const totalPages = Math.max(1, Math.ceil(cachedModelKeys.length / PAGE_SIZE));
-            if (currentModelPage > totalPages) currentModelPage = totalPages;
-            const start = (currentModelPage - 1) * PAGE_SIZE;
-            const pageKeys = cachedModelKeys.slice(start, start + PAGE_SIZE);
-            if (pageKeys.length > 0) {
-                tableBody.innerHTML = pageKeys.map(model => {
-                    const item = cachedUsageData[model];
-                    const cost = item.estimated_cost_usd || 0;
-                    return `<tr class="hover:bg-slate-50/60 transition-colors"><td class="px-5 py-2.5 font-sans font-medium text-slate-900">${model}</td><td class="px-5 py-2.5">${item.requests}</td><td class="px-5 py-2.5 text-slate-400">${item.prompt_tokens.toLocaleString()}</td><td class="px-5 py-2.5 text-slate-400">${item.completion_tokens.toLocaleString()}</td><td class="px-5 py-2.5 font-bold text-slate-900">${item.total_tokens.toLocaleString()}</td><td class="px-5 py-2.5 text-right font-bold text-emerald-600">$${cost.toFixed(4)}</td></tr>`;
-                }).join('');
-            } else {
-                tableBody.innerHTML = '<tr><td colspan="6" class="px-5 py-6 text-center text-slate-400 italic font-sans text-xs">No active completions logged yet.</td></tr>';
-            }
-            document.getElementById('model-page-info').innerText = `Page ${currentModelPage} of ${totalPages}`;
-            document.getElementById('model-prev-btn').disabled = (currentModelPage <= 1);
-            document.getElementById('model-next-btn').disabled = (currentModelPage >= totalPages);
+        function formatCount(value) {
+            return Number.isSafeInteger(value) ? numberFormat.format(value) : "—";
         }
 
-        function renderIpTable() {
-            const ipHistoryBody = document.getElementById('ip-history-body');
-            const reversedHistory = cachedIpHistory.slice().reverse();
-            const totalPages = Math.max(1, Math.ceil(reversedHistory.length / PAGE_SIZE));
-            if (currentIpPage > totalPages) currentIpPage = totalPages;
-            const start = (currentIpPage - 1) * PAGE_SIZE;
-            const pageItems = reversedHistory.slice(start, start + PAGE_SIZE);
-            if (pageItems.length > 0) {
-                ipHistoryBody.innerHTML = pageItems.map(h => `<tr class="hover:bg-slate-50/60 transition-colors"><td class="px-5 py-2.5 text-slate-400">${h.timestamp}</td><td class="px-5 py-2.5 font-bold text-slate-900">${h.ip}</td><td class="px-5 py-2.5 font-sans">${h.flag} ${h.country}</td><td class="px-5 py-2.5 text-right text-slate-400 font-sans">${h.reason}</td></tr>`).join('');
-            } else {
-                ipHistoryBody.innerHTML = '<tr><td colspan="4" class="px-5 py-6 text-center text-slate-400 italic font-sans text-xs">No rotation history recorded.</td></tr>';
-            }
-            document.getElementById('ip-page-info').innerText = `Page ${currentIpPage} of ${totalPages}`;
-            document.getElementById('ip-prev-btn').disabled = (currentIpPage <= 1);
-            document.getElementById('ip-next-btn').disabled = (currentIpPage >= totalPages);
+        function setText(id, value) {
+            document.getElementById(id).textContent = value;
         }
 
-        function changeModelPage(delta) { currentModelPage += delta; renderModelTable(); }
-        function changeIpPage(delta) { currentIpPage += delta; renderIpTable(); }
+        function createCell(value, className = "") {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            if (className) cell.className = className;
+            return cell;
+        }
 
-        function renderWarpQuality(data) {
-            const body = document.getElementById('warp-quality-body');
-            if (data && data.warp_quality) {
-                const wq = data.warp_quality;
-                body.innerHTML = `
-                    <tr><td class="px-5 py-2.5 font-sans">Total Attempts</td><td class="px-5 py-2.5 text-right">${wq.total_attempts}</td></tr>
-                    <tr><td class="px-5 py-2.5 font-sans">Successful Rotations</td><td class="px-5 py-2.5 text-right text-emerald-600">${wq.successful_rotations}</td></tr>
-                    <tr><td class="px-5 py-2.5 font-sans">Failed Rotations</td><td class="px-5 py-2.5 text-right text-rose-600">${wq.failed_rotations}</td></tr>
-                    <tr><td class="px-5 py-2.5 font-sans">Avg Latency (ms)</td><td class="px-5 py-2.5 text-right">${wq.avg_latency_ms.toFixed(1)}</td></tr>
-                `;
+        function renderUsage(modelUsage) {
+            usageBody.replaceChildren();
+            const models = Object.entries(modelUsage || {})
+                .sort(([, left], [, right]) => (right.requests || 0) - (left.requests || 0));
+            setText("model-count", `${models.length} ${models.length === 1 ? "model" : "models"}`);
+            document.getElementById("usage-empty").hidden = models.length !== 0;
+
+            for (const [name, usage] of models) {
+                const row = document.createElement("tr");
+                row.append(
+                    createCell(name, "model-name"),
+                    createCell(formatCount(usage.requests)),
+                    createCell(formatCount(usage.total_tokens)),
+                );
+                usageBody.append(row);
             }
         }
 
-        async function fetchMetrics() {
+        function renderHistory(entries) {
+            historyList.replaceChildren();
+            const history = Array.isArray(entries) ? entries : [];
+            document.getElementById("history-empty").hidden = history.length !== 0;
+
+            for (const entry of history) {
+                const item = document.createElement("li");
+                item.className = "history-item";
+                const ip = document.createElement("span");
+                ip.className = "history-ip";
+                ip.textContent = entry.ip || "IP unavailable";
+                const place = document.createElement("span");
+                place.className = "history-place";
+                place.textContent = [entry.flag, entry.country].filter(Boolean).join(" ") || "Location unavailable";
+                const time = document.createElement("time");
+                time.className = "history-time";
+                time.textContent = entry.timestamp || "Time unavailable";
+                item.append(ip, place, time);
+                historyList.append(item);
+            }
+        }
+
+        async function refreshDashboard() {
+            const message = document.getElementById("dashboard-message");
+            const status = document.getElementById("service-status");
             try {
-                const res = await fetch('/metrics');
-                const data = await res.json();
-                document.getElementById('ip').innerText = data.verified_public_ip || 'Disconnected';
-                if (data.location) {
-                    document.getElementById('location').innerText = (data.location.country || '') + (data.location.city ? ' (' + data.location.city + ')' : '');
-                    if (data.location.flag) document.getElementById('flag').innerText = data.location.flag;
-                }
-                cachedIpHistory = data.ip_history || [];
-                renderIpTable();
-                document.getElementById('rotations').innerText = data.total_rotations;
-                document.getElementById('requests').innerText = data.metrics.total_requests;
-                document.getElementById('ratelimits').innerText = data.metrics.rate_limited_requests;
-                const models = data.discovered_models || [];
-                document.getElementById('model-count-badge').innerText = models.length + ' Models';
-                cachedUsageData = data.model_usage || {};
-                cachedModelKeys = Object.keys(cachedUsageData);
-                let grandTotalUsd = 0;
-                cachedModelKeys.forEach(m => { grandTotalUsd += (cachedUsageData[m].estimated_cost_usd || 0); });
-                document.getElementById('total-saved').innerText = '$' + grandTotalUsd.toFixed(4);
-                renderModelTable();
-                renderWarpQuality(data);
-            } catch (e) { /* dashboard will retry */ }
-        }
+                const response = await fetch("/dashboard/stats", { cache: "no-store" });
+                if (!response.ok) throw new Error("Dashboard request failed");
+                const data = await response.json();
+                setText("ip", typeof data.verified_ip === "string" && data.verified_ip ? data.verified_ip : "Unavailable");
+                const location = data.location || {};
+                setText("location", [location.country, location.city].filter(Boolean).join(" · ") || "Location unavailable");
+                setText("requests", formatCount(data.total_requests));
+                setText("rotations", formatCount(data.rotation_count));
+                setText("ratelimits", formatCount(data.rate_limited_requests));
+                renderUsage(data.model_usage);
+                renderHistory(data.recent_ips);
 
-        async function rotateNow() {
-            const btn = document.getElementById('rotate-btn');
-            const originalText = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '<svg class="animate-spin -ml-1 mr-1.5 h-3.5 w-3.5 text-white inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Rotating...';
-            try {
-                await fetch('/api/rotate', { method: 'POST' });
-                let attempts = 0;
-                const pollInterval = setInterval(async () => {
-                    attempts++;
-                    await fetchMetrics();
-                    if (attempts >= 6) {
-                        clearInterval(pollInterval);
-                        btn.disabled = false;
-                        btn.innerHTML = originalText;
-                    }
-                }, 1000);
-            } catch (e) {
-                btn.disabled = false;
-                btn.innerHTML = originalText;
+                const rotatorOnline = data.rotator_status === "online";
+                status.dataset.state = rotatorOnline ? "online" : "unavailable";
+                setText("service-status-text", rotatorOnline ? "WARP online" : "WARP unavailable");
+                message.dataset.state = "";
+                setText("dashboard-message", rotatorOnline ? "Metrics update automatically." : "WARP rotation data is unavailable; other metrics are current.");
+            } catch {
+                status.dataset.state = "error";
+                setText("service-status-text", "Connection error");
+                setText("ip", "Unavailable");
+                setText("location", "Location unavailable");
+                setText("requests", "—");
+                setText("rotations", "—");
+                setText("ratelimits", "—");
+                message.dataset.state = "error";
+                setText("dashboard-message", "Dashboard data could not be loaded. Retrying shortly.");
             }
+            window.setTimeout(refreshDashboard, 10000);
         }
 
-        setInterval(fetchMetrics, 3000);
-        fetchMetrics();
+        refreshDashboard();
     </script>
 </body>
 </html>
