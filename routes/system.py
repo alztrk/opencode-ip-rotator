@@ -55,8 +55,9 @@ async def get_metrics(request: Request):
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
-        {"request": request, "metrics": metrics},
+        {"metrics": metrics},
     )
 
 

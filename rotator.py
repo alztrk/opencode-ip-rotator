@@ -157,20 +157,40 @@ def has_active_flow_leases() -> bool:
 
 
 def get_public_ip() -> Optional[str]:
-    """Fetches current public IP using Chrome TLS impersonation."""
+    """Fetches current public IP using Chrome TLS impersonation with urllib fallback."""
+    # Try curl_cffi first
     try:
-        from curl_cffi import requests
-        resp = requests.get("https://api.ipify.org?format=json", impersonate="chrome124", timeout=5)
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.get("https://api.ipify.org?format=json", impersonate="chrome124", timeout=5)
         if resp.status_code == 200:
             return resp.json().get("ip")
     except Exception:
+        pass
+    try:
+        from curl_cffi import requests as cffi_requests
+        resp = cffi_requests.get("https://ifconfig.me/ip", impersonate="chrome124", timeout=5)
+        if resp.status_code == 200:
+            return resp.text.strip()
+    except Exception:
+        pass
+    # Fallback: plain urllib (no TLS impersonation needed for IP lookup)
+    for url in [
+        "https://api.ipify.org?format=json",
+        "https://api4.my-ip.io/v2/ip.json",
+        "https://httpbin.org/ip",
+    ]:
         try:
-            from curl_cffi import requests
-            resp = requests.get("https://ifconfig.me/ip", impersonate="chrome124", timeout=5)
-            if resp.status_code == 200:
-                return resp.text.strip()
+            from urllib.request import Request, urlopen
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req, timeout=5) as r:
+                import json as _json
+                data = _json.loads(r.read().decode())
+                ip = data.get("ip") or data.get("origin")
+                if ip:
+                    return ip.split(",")[0].strip()
         except Exception:
-            return None
+            continue
+    return None
 
 
 def get_public_ip_via_proxy(proxy: Dict[str, str]) -> Optional[str]:
