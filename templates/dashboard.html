@@ -26,11 +26,6 @@
         header { border-bottom: 1px solid var(--line); background: var(--surface); }
         .topbar { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
         .brand { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -0.02em; }
-        .status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
-        .status-mark { width: 8px; height: 8px; border-radius: 50%; background: #748078; }
-        .status[data-state="online"] .status-mark { background: #33815d; }
-        .status[data-state="unavailable"] .status-mark,
-        .status[data-state="error"] .status-mark { background: #b75c43; }
         main { padding-block: 42px 64px; }
         .intro { margin-bottom: 26px; }
         h1 { margin: 0; font-size: clamp(23px, 4vw, 30px); line-height: 1.2; letter-spacing: -0.035em; }
@@ -89,10 +84,6 @@
     <header>
         <div class="shell topbar">
             <p class="brand">OpenCode IP Rotator</p>
-            <div id="service-status" class="status" data-state="loading" role="status" aria-live="polite">
-                <span class="status-mark" aria-hidden="true"></span>
-                <span id="service-status-text">Connecting</span>
-            </div>
         </div>
     </header>
 
@@ -217,7 +208,6 @@
 
         async function refreshDashboard() {
             const message = document.getElementById("dashboard-message");
-            const status = document.getElementById("service-status");
             try {
                 const response = await fetch("/dashboard/stats", { cache: "no-store" });
                 if (!response.ok) throw new Error("Dashboard request failed");
@@ -232,13 +222,9 @@
                 renderHistory(data.recent_ips);
 
                 const rotatorOnline = data.rotator_status === "online";
-                status.dataset.state = rotatorOnline ? "online" : "unavailable";
-                setText("service-status-text", rotatorOnline ? "WARP online" : "WARP unavailable");
                 message.dataset.state = "";
                 setText("dashboard-message", rotatorOnline ? "Metrics update automatically." : "WARP rotation data is unavailable; other metrics are current.");
             } catch {
-                status.dataset.state = "error";
-                setText("service-status-text", "Connection error");
                 setText("ip", "Unavailable");
                 setText("location", "Location unavailable");
                 setText("requests", "—");
